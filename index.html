@@ -1170,6 +1170,13 @@
           <p id="wait-msg-footer" class="font-bold text-sm uppercase tracking-widest" style="color:var(--text-2)">En attente...</p>
         </div>
 
+        <div id="zone-winner-reveal" class="hidden flex-col items-center justify-center py-4 gap-3" style="max-width:460px;margin:0 auto;width:100%">
+          <p id="winner-reveal-msg" class="font-bold text-base uppercase tracking-widest text-center" style="color:var(--accent)"></p>
+          <button id="btn-continue-round" onclick="confirmNextRound()" class="hidden btn btn-primary w-full">
+            <i data-lucide="arrow-right-circle"></i>&nbsp;Manche suivante
+          </button>
+        </div>
+
       </footer>
     </div>
   </section>
@@ -1530,7 +1537,8 @@
       maxRounds: 5,
       phrase: null,
       bossThinking: false,
-      roundResolving: false
+      roundResolving: false,
+      winnerReveal: null   // id du gagnant pendant la phase de révélation
     };
 
     /* ═══════════════════════════════════════════════════════════
@@ -1542,6 +1550,8 @@
        tout nouvel abonnement.
     ═══════════════════════════════════════════════════════════ */
     let roomListener = null;
+    // Timer pour l'apparition différée du bouton "Manche suivante" (+3 secondes)
+    let winnerRevealBtnTimer = null;
 
     /* ─── UI UTILS ─── */
     window.showScreen = id => {
@@ -1657,7 +1667,7 @@
             openConfig('solo');
         } else {
             if (state.isHost) {
-                let updates = { status: 'lobby', round: 1, bossIdx: 0, phrase: null };
+                let updates = { status: 'lobby', round: 1, bossIdx: 0, phrase: null, winnerReveal: null };
                 Object.keys(state.players).forEach(pId => {
                     updates[`players/${pId}/score`] = 0;
                     updates[`players/${pId}/played`] = null;
@@ -1816,7 +1826,7 @@
       state.roomId = Math.floor(1000 + Math.random() * 8999).toString();
       await set(ref(db, 'bmc_creator/' + state.roomId), {
         status: 'lobby', hostId: state.uid, round: 1, maxRounds: state.maxRounds,
-        bossIdx: 0, phrase: null,
+        bossIdx: 0, phrase: null, winnerReveal: null,
         players: { [state.uid]: { name: state.name, score: 0, played: null, locked: false } }
       });
       onDisconnect(ref(db, 'bmc_creator/' + state.roomId)).remove();
@@ -1889,11 +1899,12 @@
         }
 
         // Synchronisation complète de l'état local depuis Firebase
-        state.players   = data.players  || {};
-        state.bossIdx   = data.bossIdx  ?? 0;
-        state.round     = data.round    ?? 1;
-        state.maxRounds = data.maxRounds ?? 5;
-        state.phrase    = data.phrase   ?? null;
+        state.players      = data.players    || {};
+        state.bossIdx      = data.bossIdx    ?? 0;
+        state.round        = data.round      ?? 1;
+        state.maxRounds    = data.maxRounds  ?? 5;
+        state.phrase       = data.phrase     ?? null;
+        state.winnerReveal = data.winnerReveal || null;  // ← sync révélation gagnant
 
         document.getElementById('lobby-players').innerHTML =
           Object.values(data.players || {}).map(p => `
@@ -1944,40 +1955,68 @@
       }
     };
 
+    /* ─── SÉLECTION DU GAGNANT PAR LE BOSS ─── */
     window.winRound = async winnerId => {
       const pIds = Object.keys(state.players);
-      // Sécurité : seul le boss du tour peut choisir un vainqueur (Solo & Multi)
+      // Sécurité : seul le boss humain du tour peut voter
       if (pIds[state.bossIdx] !== state.uid) return;
+      // Éviter un double-clic pendant la révélation
+      if (state.winnerReveal) return;
 
+      if (state.mode === 'multi') {
+        // Écriture atomique : tous les clients voient le gagnant via onValue
+        await update(ref(db, `bmc_creator/${state.roomId}`), { winnerReveal: winnerId });
+      } else {
+        // Solo : mise à jour locale + affichage
+        state.winnerReveal = winnerId;
+        updateUI();
+        // Le bouton "Manche suivante" apparaîtra après 3s (géré dans updateUI)
+      }
+    };
+
+    /* ─── CONFIRMATION FIN DE MANCHE (bouton "Manche suivante") ─── */
+    window.confirmNextRound = async () => {
+      const winnerId = state.winnerReveal;
+      if (!winnerId) return;
+
+      // Nettoyer le timer d'apparition du bouton
+      if (winnerRevealBtnTimer) { clearTimeout(winnerRevealBtnTimer); winnerRevealBtnTimer = null; }
+
+      const pIds      = Object.keys(state.players);
       const nextRound = state.round + 1;
       const nextBoss  = (state.bossIdx + 1) % pIds.length;
 
-      // Gestion de la fin de partie
       if (nextRound > state.maxRounds) {
+        // ── Fin de partie ──
         if (state.mode === 'multi') {
-            let updates = { status: 'end' };
-            updates[`players/${winnerId}/score`] = state.players[winnerId].score + 1;
-            await update(ref(db, `bmc_creator/${state.roomId}`), updates);
+          let updates = { status: 'end', winnerReveal: null };
+          updates[`players/${winnerId}/score`] = state.players[winnerId].score + 1;
+          await update(ref(db, `bmc_creator/${state.roomId}`), updates);
         } else {
-            state.players[winnerId].score++;
-            showFinal();
+          state.players[winnerId].score++;
+          state.winnerReveal   = null;
+          state.roundResolving = false;
+          showFinal();
         }
         return;
       }
 
+      // ── Manche suivante ──
       if (state.mode === 'multi') {
-        let updates = { round: nextRound, bossIdx: nextBoss, phrase: null };
+        let updates = { round: nextRound, bossIdx: nextBoss, phrase: null, winnerReveal: null };
         pIds.forEach(pId => {
-          updates[`players/${pId}/played`]  = null;
-          updates[`players/${pId}/locked`]  = false;
+          updates[`players/${pId}/played`] = null;
+          updates[`players/${pId}/locked`] = false;
           if (pId === winnerId) updates[`players/${pId}/score`] = state.players[pId].score + 1;
         });
         await update(ref(db, `bmc_creator/${state.roomId}`), updates);
       } else {
         state.players[winnerId].score++;
-        state.round   = nextRound;
-        state.bossIdx = nextBoss;
-        state.phrase  = null;
+        state.round          = nextRound;
+        state.bossIdx        = nextBoss;
+        state.phrase         = null;
+        state.winnerReveal   = null;
+        state.roundResolving = false;
         Object.values(state.players).forEach(p => { p.played = null; p.locked = false; p.isThinking = false; });
         runSoloEngine();
       }
@@ -2019,28 +2058,23 @@
       const competitors = pIds.filter(id => id !== bossId);
       if (isBotBoss && competitors.every(id => state.players[id].locked) && !state.roundResolving) {
         state.roundResolving = true;
+        // Choisir le gagnant aléatoire et révéler sa carte
+        const randWinner = competitors[Math.floor(Math.random() * competitors.length)];
+        state.winnerReveal = randWinner;
+        updateUI(); // affiche la carte gagnante avec le nom du joueur
+        // Le bot passe automatiquement à la manche suivante après 7 secondes
         setTimeout(() => {
-          const randWinner = competitors[Math.floor(Math.random() * competitors.length)];
-          state.players[randWinner].score++;
-          state.round++;
-          state.bossIdx = (state.bossIdx + 1) % pIds.length;
-          state.phrase = null;
-          state.roundResolving = false;
-          Object.values(state.players).forEach(p => { p.played = null; p.locked = false; p.isThinking = false; });
-          
-          if (state.round > state.maxRounds) {
-              showFinal();
-          } else {
-              runSoloEngine();
-          }
-        }, 5000);
+          confirmNextRound();
+        }, 7000);
       }
     }
 
     /* ─── UPDATE UI ─── */
     function updateUI() {
-      const pIds   = Object.keys(state.players);
-      const isBoss = pIds[state.bossIdx] === state.uid;
+      const pIds    = Object.keys(state.players);
+      const bossId  = pIds[state.bossIdx];
+      const isBoss  = bossId === state.uid;
+      const bossName = (state.players[bossId] && state.players[bossId].name) ? state.players[bossId].name : 'Boss';
 
       document.getElementById('ui-round').innerText = `Manche ${state.round} / ${state.maxRounds}`;
       document.getElementById('ui-role').innerText  = isBoss ? "TU ES LE BOSS 👑" : "JOUEUR ✍️";
@@ -2049,31 +2083,75 @@
       const zBoss   = document.getElementById('zone-boss-input');
       const zPlayer = document.getElementById('zone-player-input');
       const zWait   = document.getElementById('zone-waiting');
+      const zReveal = document.getElementById('zone-winner-reveal');
       const phraseDisp = document.getElementById('phrase-display');
       const blueCard   = document.getElementById('blue-card');
 
       zBoss.classList.add('hidden');
       zPlayer.classList.add('hidden');
       zWait.classList.add('hidden');
+      zReveal.classList.add('hidden');
 
-      if (!state.phrase) {
-        phraseDisp.innerText = isBoss ? "À toi de créer le trou de mémoire !" : "Le Boss rédige la question...";
+      /* ── PHASE RÉVÉLATION DU GAGNANT ── */
+      if (state.winnerReveal) {
+        blueCard.classList.remove('pulse-border');
+        phraseDisp.innerText = state.phrase ? state.phrase.replace(/___/g, '...') : '...';
+
+        const winnerName = (state.players[state.winnerReveal] && state.players[state.winnerReveal].name)
+          ? state.players[state.winnerReveal].name : '?';
+        document.getElementById('winner-reveal-msg').innerText = `🏆 ${winnerName} remporte la manche !`;
+
+        const btn = document.getElementById('btn-continue-round');
+        // Toujours réinitialiser le bouton caché — il apparaît via le timer
+        btn.classList.add('hidden');
+
+        zReveal.classList.remove('hidden');
+        document.getElementById('ui-status').innerText = 'RÉSULTAT';
+
+        // Lancer le timer d'apparition du bouton (boss uniquement, une seule fois)
+        if (isBoss && !winnerRevealBtnTimer) {
+          winnerRevealBtnTimer = setTimeout(() => {
+            const b = document.getElementById('btn-continue-round');
+            if (b) b.classList.remove('hidden');
+            winnerRevealBtnTimer = null;
+          }, 3000);
+        }
+
+        const competitors = pIds.filter(id => id !== bossId);
+        renderTable(competitors, false, true, state.winnerReveal);
+
+      /* ── PHASE RÉDACTION DE LA PHRASE ── */
+      } else if (!state.phrase) {
+        // Nettoyer le timer si on revient d'un état révélation
+        if (winnerRevealBtnTimer) { clearTimeout(winnerRevealBtnTimer); winnerRevealBtnTimer = null; }
+
+        if (isBoss) {
+          phraseDisp.innerText = "À toi de créer le trou de mémoire !";
+        } else {
+          // NOUVEAU : afficher le nom du boss pendant qu'il rédige
+          phraseDisp.innerText = `Le Boss ${bossName} rédige la question...`;
+        }
         blueCard.classList.toggle('pulse-border', isBoss);
-        if (isBoss) zBoss.classList.remove('hidden');
-        else {
+
+        if (isBoss) {
+          zBoss.classList.remove('hidden');
+        } else {
           zWait.classList.remove('hidden');
-          document.getElementById('wait-msg-footer').innerText = "Attente du Boss...";
+          document.getElementById('wait-msg-footer').innerText = `En attente de ${bossName}...`;
         }
         document.getElementById('table-zone').innerHTML = '';
         document.getElementById('ui-status').innerText = 'RÉDACTION';
+
+      /* ── PHASE RÉPONSES ET VOTE ── */
       } else {
+        if (winnerRevealBtnTimer) { clearTimeout(winnerRevealBtnTimer); winnerRevealBtnTimer = null; }
         blueCard.classList.remove('pulse-border');
         phraseDisp.innerText = state.phrase.replace(/___/g, '...');
 
-        const competitors = pIds.filter(id => id !== pIds[state.bossIdx]);
+        const competitors = pIds.filter(id => id !== bossId);
         const allLocked   = competitors.every(id => state.players[id].locked);
 
-        renderTable(competitors, isBoss && allLocked, allLocked);
+        renderTable(competitors, isBoss && allLocked, allLocked, null);
 
         if (allLocked) {
           zWait.classList.remove('hidden');
@@ -2083,7 +2161,7 @@
           if (isBoss) {
             zWait.classList.remove('hidden');
             document.getElementById('wait-msg-footer').innerText = "Les joueurs écrivent...";
-          } else if (state.players[state.uid].locked) {
+          } else if (state.players[state.uid] && state.players[state.uid].locked) {
             zWait.classList.remove('hidden');
             document.getElementById('wait-msg-footer').innerText = "Réponse envoyée ! ✓";
           } else {
@@ -2100,16 +2178,16 @@
     }
 
     /* ─── RENDER TABLE ─── */
-    function renderTable(competitorIds, canVote, allLocked) {
+    function renderTable(competitorIds, canVote, allLocked, revealWinnerId) {
       const table = document.getElementById('table-zone');
       table.innerHTML = '';
-      if (!allLocked) return;
+      if (!allLocked && !revealWinnerId) return;
 
       const count = competitorIds.length;
-      
+
       // Dynamic sizing based on number of players
-      let cardClass = 'card card-white p-2 text-center text-xs flex flex-col justify-center font-bold relative transition-all';
-      if(count <= 3) {
+      let cardClass = 'card card-white p-2 text-center text-xs flex flex-col justify-center items-center font-bold relative transition-all';
+      if (count <= 3) {
           cardClass += ' w-[120px] min-h-[140px] text-sm';
       } else if (count <= 6) {
           cardClass += ' w-[100px] min-h-[120px] text-xs';
@@ -2118,17 +2196,42 @@
       }
 
       competitorIds.forEach((id, idx) => {
-        const p  = state.players[id];
-        const el = document.createElement('div');
+        const p        = state.players[id];
+        const isWinner = revealWinnerId && revealWinnerId === id;
+        const el       = document.createElement('div');
+
         el.className = cardClass;
         el.style.animationDelay = (idx * 0.08) + 's';
-        el.innerText = p.played;
 
-        if (canVote) {
-          el.classList.add('ring-2', 'hover:scale-105', 'cursor-pointer');
-          el.onclick = () => winRound(id);
-        } else {
+        if (revealWinnerId) {
+          /* ── Mode révélation : carte gagnante mise en avant ── */
           el.style.cursor = 'default';
+          if (isWinner) {
+            // Carte gagnante : anneau coloré + nom du joueur en bas
+            el.classList.add('ring-4');
+            el.style.transform     = 'scale(1.1)';
+            el.style.zIndex        = '10';
+            el.style.transition    = 'all 0.4s cubic-bezier(0.22,1,0.36,1)';
+            el.innerHTML =
+              `<span style="flex:1;display:flex;align-items:center;justify-content:center;text-align:center;padding:0 2px">${p.played}</span>` +
+              `<span style="font-size:0.58rem;font-weight:900;letter-spacing:0.07em;text-transform:uppercase;` +
+              `color:var(--accent);border-top:1px solid rgba(0,0,0,0.08);padding-top:0.35rem;margin-top:0.35rem;width:100%;text-align:center">${p.name}</span>`;
+          } else {
+            // Cartes perdantes : légèrement estompées
+            el.style.opacity    = '0.45';
+            el.style.transform  = 'scale(0.95)';
+            el.style.transition = 'all 0.4s cubic-bezier(0.22,1,0.36,1)';
+            el.innerText = p.played;
+          }
+        } else {
+          /* ── Mode vote normal ── */
+          el.innerText = p.played;
+          if (canVote) {
+            el.classList.add('ring-2', 'hover:scale-105', 'cursor-pointer');
+            el.onclick = () => winRound(id);
+          } else {
+            el.style.cursor = 'default';
+          }
         }
         table.appendChild(el);
       });
