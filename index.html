@@ -941,26 +941,7 @@
 </head>
 <body>
 
-<script type="module">
-  // Import the functions you need from the SDKs you need
-  import { initializeApp } from "https://www.gstatic.com/firebasejs/12.12.0/firebase-app.js";
-  // TODO: Add SDKs for Firebase products that you want to use
-  // https://firebase.google.com/docs/web/setup#available-libraries
 
-  // Your web app's Firebase configuration
-  const firebaseConfig = {
-    apiKey: "AIzaSyDwoZhEW_dg5pHx5QjCYMPO1SbEseZgrcY",
-    authDomain: "blanc-manger-coco-66beb.firebaseapp.com",
-    databaseURL: "https://blanc-manger-coco-66beb-default-rtdb.europe-west1.firebasedatabase.app",
-    projectId: "blanc-manger-coco-66beb",
-    storageBucket: "blanc-manger-coco-66beb.firebasestorage.app",
-    messagingSenderId: "287835142877",
-    appId: "1:287835142877:web:ea941f0236a577a15e3934"
-  };
-
-  // Initialize Firebase
-  const app = initializeApp(firebaseConfig);
-</script>
 
   <div id="ambient-bg">
     <div class="orb orb-1"></div>
@@ -1329,6 +1310,31 @@
 
   <script type="module">
 
+    /* ═══════════════════════════════════════════════════════════
+       CORRECTION #1 — Firebase entièrement réinitialisé ici.
+       L'ancien bloc <script type="module"> ne faisait qu'un
+       initializeApp() sans importer getDatabase, ref, set, etc.
+       Ces fonctions étaient donc undefined dans tout le code.
+       On importe maintenant TOUT ce dont on a besoin en une seule
+       fois, dans le même module que la logique de jeu.
+    ═══════════════════════════════════════════════════════════ */
+    import { initializeApp }      from "https://www.gstatic.com/firebasejs/12.12.0/firebase-app.js";
+    import { getDatabase, ref, set, get, update, onValue, onDisconnect }
+                                   from "https://www.gstatic.com/firebasejs/12.12.0/firebase-database.js";
+
+    const firebaseConfig = {
+      apiKey:            "AIzaSyDwoZhEW_dg5pHx5QjCYMPO1SbEseZgrcY",
+      authDomain:        "blanc-manger-coco-66beb.firebaseapp.com",
+      databaseURL:       "https://blanc-manger-coco-66beb-default-rtdb.europe-west1.firebasedatabase.app",
+      projectId:         "blanc-manger-coco-66beb",
+      storageBucket:     "blanc-manger-coco-66beb.firebasestorage.app",
+      messagingSenderId: "287835142877",
+      appId:             "1:287835142877:web:ea941f0236a577a15e3934"
+    };
+
+    const app = initializeApp(firebaseConfig);
+    const db  = getDatabase(app);   // ← était complètement absent avant
+
     /* ─── DRAW POOLS ─── */
     const DRAW_QUESTIONS = [
       "Le secret de ma réussite ? C'est ... .",
@@ -1527,6 +1533,16 @@
       roundResolving: false
     };
 
+    /* ═══════════════════════════════════════════════════════════
+       CORRECTION #2 — Référence au listener onValue stockée.
+       Avant : watchRoom() créait un nouveau listener à chaque
+       appel (rejoin, replay) sans jamais annuler le précédent.
+       Résultat : accumulation de callbacks, état désynchronisé.
+       Maintenant : on stocke l'unsubscribe et on nettoie avant
+       tout nouvel abonnement.
+    ═══════════════════════════════════════════════════════════ */
+    let roomListener = null;
+
     /* ─── UI UTILS ─── */
     window.showScreen = id => {
       document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
@@ -1596,12 +1612,44 @@
       }
     };
 
-    window.leaveLobby = async () => {
-        if (state.mode === 'multi' && state.isHost && state.roomId) {
+    /* ═══════════════════════════════════════════════════════════
+       CORRECTION #3 — confirmLeave nettoie Firebase correctement.
+       Avant : seul l'écran changeait, la salle restait en base.
+       Maintenant : l'hôte supprime la salle entière, les autres
+       joueurs suppriment uniquement leur entrée.
+       Le listener onValue est aussi annulé proprement.
+    ═══════════════════════════════════════════════════════════ */
+    window.confirmLeave = async () => {
+      if (confirm("Es-tu sûr de vouloir quitter la partie ? Ta progression sera perdue.")) {
+        if (roomListener) { roomListener(); roomListener = null; }
+        if (state.mode === 'multi' && state.roomId) {
+          if (state.isHost) {
             await set(ref(db, `bmc_creator/${state.roomId}`), null);
+          } else {
+            await set(ref(db, `bmc_creator/${state.roomId}/players/${state.uid}`), null);
+          }
         }
         clearActiveSession();
-        openConfig('multi');
+        showScreen('screen-main');
+      }
+    };
+
+    /* ═══════════════════════════════════════════════════════════
+       CORRECTION #4 — leaveLobby gère hôte ET joueurs normaux.
+       Avant : seul l'hôte supprimait la salle. Un joueur non-hôte
+       quittant le lobby restait fantôme dans la liste.
+    ═══════════════════════════════════════════════════════════ */
+    window.leaveLobby = async () => {
+      if (roomListener) { roomListener(); roomListener = null; }
+      if (state.mode === 'multi' && state.roomId) {
+        if (state.isHost) {
+          await set(ref(db, `bmc_creator/${state.roomId}`), null);
+        } else {
+          await set(ref(db, `bmc_creator/${state.roomId}/players/${state.uid}`), null);
+        }
+      }
+      clearActiveSession();
+      openConfig('multi');
     };
 
     window.replayGame = async () => {
@@ -1660,7 +1708,6 @@
         runSoloEngine();
       }
     }
-
     /* ─── ROUND PIPS ─── */
     function updateRoundPips() {
       const container = document.getElementById('round-pips');
@@ -1759,6 +1806,11 @@
     };
 
     /* ─── MULTI ─── */
+
+    /* ═══════════════════════════════════════════════════════════
+       CORRECTION #5 — createRoom : db est maintenant défini.
+       onDisconnect supprime la salle si l'hôte se déconnecte.
+    ═══════════════════════════════════════════════════════════ */
     async function createRoom() {
       state.isHost = true;
       state.roomId = Math.floor(1000 + Math.random() * 8999).toString();
@@ -1772,51 +1824,101 @@
       watchRoom();
     }
 
+    /* ═══════════════════════════════════════════════════════════
+       CORRECTION #6 — joinRoom entièrement réécrit.
+       Avant : score réinitialisé à 0 à chaque reconnexion, pas de
+       garde contre les parties déjà en cours, pas de onDisconnect
+       pour les non-hôtes (joueurs fantômes en cas de coupure réseau).
+    ═══════════════════════════════════════════════════════════ */
     async function joinRoom(id) {
       const snap = await get(ref(db, `bmc_creator/${id}`));
-      if (snap.exists()) {
-        state.roomId = id;
-        await update(ref(db, `bmc_creator/${id}/players/${state.uid}`), { name: state.name, score: 0, played: null, locked: false });
-        saveCurrentSession(state.roomId, true);
-        watchRoom();
-        return true;
-      } else {
+      if (!snap.exists()) {
         showToast("Salon introuvable !", 'error');
         return false;
       }
+      const data = snap.val();
+      const existingPlayer = data.players && data.players[state.uid];
+
+      // Bloquer un nouveau joueur qui tenterait de rejoindre une partie déjà lancée
+      if (data.status === 'playing' && !existingPlayer) {
+        showToast("La partie est déjà en cours !", 'error');
+        return false;
+      }
+
+      state.roomId = id;
+
+      if (!existingPlayer) {
+        // Première connexion → initialiser le joueur avec score = 0
+        await update(ref(db, `bmc_creator/${id}/players/${state.uid}`),
+          { name: state.name, score: 0, played: null, locked: false });
+        // Nettoyage automatique si déconnexion réseau (non-hôte)
+        onDisconnect(ref(db, `bmc_creator/${id}/players/${state.uid}`)).remove();
+      } else {
+        // Reconnexion → mettre à jour le pseudo uniquement, score préservé
+        await update(ref(db, `bmc_creator/${id}/players/${state.uid}`),
+          { name: state.name });
+      }
+
+      saveCurrentSession(state.roomId, true);
+      watchRoom();
+      return true;
     }
 
+    /* ═══════════════════════════════════════════════════════════
+       CORRECTION #7 — watchRoom : gestion du listener unique.
+       Avant : chaque appel créait un nouveau onValue sans annuler
+       le précédent → accumulation de callbacks, état en chaos.
+       Maintenant : on annule proprement l'ancien listener AVANT
+       d'en créer un nouveau.
+    ═══════════════════════════════════════════════════════════ */
     function watchRoom() {
-      document.getElementById('lobby-code').innerText = state.roomId;
-      
-      onValue(ref(db, `bmc_creator/${state.roomId}`), snap => {
-        const data = snap.val();
-        if (!data) return;
-        state.players   = data.players;
-        state.bossIdx   = data.bossIdx;
-        state.round     = data.round;
-        state.maxRounds = data.maxRounds;
-        state.phrase    = data.phrase;
+      // Annuler tout listener précédent (reconnexion / replay)
+      if (roomListener) { roomListener(); roomListener = null; }
 
-        document.getElementById('lobby-players').innerHTML = Object.values(data.players).map(p => `
-          <div class="lobby-player">
-            <span class="font-bold text-sm" style="color:var(--text-1)">${p.name}</span>
-            <span class="status-badge">En ligne</span>
-          </div>`).join('');
+      document.getElementById('lobby-code').innerText = state.roomId;
+
+      roomListener = onValue(ref(db, `bmc_creator/${state.roomId}`), snap => {
+        const data = snap.val();
+        if (!data) {
+          // La salle a été supprimée (hôte parti)
+          if (roomListener) { roomListener(); roomListener = null; }
+          showToast("Le salon a été fermé par l'hôte.", 'error');
+          clearActiveSession();
+          showScreen('screen-main');
+          return;
+        }
+
+        // Synchronisation complète de l'état local depuis Firebase
+        state.players   = data.players  || {};
+        state.bossIdx   = data.bossIdx  ?? 0;
+        state.round     = data.round    ?? 1;
+        state.maxRounds = data.maxRounds ?? 5;
+        state.phrase    = data.phrase   ?? null;
+
+        document.getElementById('lobby-players').innerHTML =
+          Object.values(data.players || {}).map(p => `
+            <div class="lobby-player">
+              <span class="font-bold text-sm" style="color:var(--text-1)">${p.name}</span>
+              <span class="status-badge">En ligne</span>
+            </div>`).join('');
 
         if (data.status === 'lobby') {
-            document.getElementById('btn-host-start').classList.toggle('hidden', !state.isHost);
-            document.getElementById('lobby-wait').classList.toggle('hidden', state.isHost);
-            showScreen('screen-lobby');
+          document.getElementById('btn-host-start').classList.toggle('hidden', !state.isHost);
+          document.getElementById('lobby-wait').classList.toggle('hidden', state.isHost);
+          showScreen('screen-lobby');
         }
-        if (data.status === 'playing') { showScreen('screen-game'); updateUI(); }
-        if (data.status === 'end')     showFinal();
+        if (data.status === 'playing') {
+          showScreen('screen-game');
+          updateUI();
+        }
+        if (data.status === 'end') {
+          showFinal();
+        }
       });
     }
 
     window.multiStartMatch = () => update(ref(db, `bmc_creator/${state.roomId}`), { status: 'playing' });
 
-    /* ─── USER ACTIONS ─── */
     window.drawIdea = type => {
       if (type === 'boss')   document.getElementById('boss-text').value   = DRAW_QUESTIONS[Math.floor(Math.random() * DRAW_QUESTIONS.length)];
       else                   document.getElementById('player-text').value = DRAW_ANSWERS[Math.floor(Math.random()   * DRAW_ANSWERS.length)];
@@ -1880,7 +1982,6 @@
         runSoloEngine();
       }
     };
-
     /* ─── SOLO ENGINE ─── */
     function runSoloEngine() {
       updateUI();
