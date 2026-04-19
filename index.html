@@ -920,6 +920,24 @@
     }
 
     /* =============================================
+       CLASSIQUE — HAND CARDS
+    ============================================= */
+    .classique-card {
+      width: 90px !important;
+      min-height: 115px !important;
+      font-size: 0.72rem !important;
+      padding: 0.6rem !important;
+      flex-shrink: 0;
+      cursor: pointer;
+      line-height: 1.3;
+    }
+    #classique-hand {
+      -webkit-overflow-scrolling: touch;
+      scrollbar-width: none;
+    }
+    #classique-hand::-webkit-scrollbar { display: none; }
+
+    /* =============================================
        RESPONSIVE
     ============================================= */
     @media (max-height: 650px) {
@@ -1007,7 +1025,7 @@
         <div class="flex items-center gap-3.5">
           <div class="mode-card-icon"><i data-lucide="globe"></i></div>
           <div>
-            <p class="font-display font-bold text-lg" style="color:var(--text-1)">Multi Ligne</p>
+            <p class="font-display font-bold text-lg" style="color:var(--text-1)">Multijoueur</p>
             <p class="text-xs mt-0.5" style="color:var(--text-2)">Rejoins tes amis en temps réel</p>
           </div>
         </div>
@@ -1054,6 +1072,14 @@
         <div id="cfg-rounds-zone" class="hidden">
           <label class="overline mb-2">Nombre de manches</label>
           <input type="number" id="cfg-rounds" value="5" min="1" max="20">
+        </div>
+
+        <div id="cfg-variant-zone" class="hidden">
+          <label class="overline mb-2">Variante</label>
+          <div class="grid grid-cols-2 gap-2">
+            <button id="btn-variant-classique" onclick="selectVariant('classique')" class="p-3 text-xs font-bold uppercase rounded-xl border border-[var(--border)] bg-[var(--bg-surface)] hover:bg-[var(--bg-surface-hover)] transition-all">🃏 Classique</button>
+            <button id="btn-variant-personnalise" onclick="selectVariant('personnalise')" class="p-3 text-xs font-bold uppercase rounded-xl border border-[var(--border)] bg-[var(--bg-surface)] hover:bg-[var(--bg-surface-hover)] transition-all">✏️ Personnalisé</button>
+          </div>
         </div>
       </div>
 
@@ -1175,6 +1201,26 @@
           <button id="btn-continue-round" onclick="confirmNextRound()" class="hidden btn btn-primary w-full">
             <i data-lucide="arrow-right-circle"></i>&nbsp;Continuer
           </button>
+        </div>
+
+        <div id="zone-classique-boss" class="hidden space-y-3" style="max-width:460px;margin:0 auto;width:100%">
+          <div class="flex justify-between items-center">
+            <span class="overline">Ta question</span>
+            <button onclick="classiqueBossRedraw()" class="flex items-center gap-1.5 text-xs font-bold" style="color:var(--accent)">
+              <i data-lucide="dices"></i>&nbsp;Piocher
+            </button>
+          </div>
+          <div class="card card-blue p-4 min-h-[70px] flex items-center justify-center" style="width:100%">
+            <p id="classique-boss-question" class="font-display text-base font-bold text-center relative z-10" style="color:white"></p>
+          </div>
+          <button onclick="submitClassiquePhrase()" class="btn btn-primary w-full">
+            <i data-lucide="send"></i>&nbsp;Poser cette question
+          </button>
+        </div>
+
+        <div id="zone-classique-player" class="hidden space-y-2" style="max-width:540px;margin:0 auto;width:100%">
+          <span class="overline">Ta main — choisir une carte</span>
+          <div id="classique-hand" class="flex gap-2 overflow-x-auto" style="padding-bottom:0.25rem"></div>
         </div>
 
       </footer>
@@ -1536,6 +1582,7 @@
       round: 1,
       maxRounds: 5,
       phrase: null,
+      gameVariant: 'personnalise',
       bossThinking: false,
       roundResolving: false,
       winnerReveal: null   // id du gagnant pendant la phase de révélation
@@ -1552,6 +1599,113 @@
     let roomListener = null;
     // Timer pour l'apparition différée du bouton "Manche suivante" (+3 secondes)
     let winnerRevealBtnTimer = null;
+    // Compteur de génération pour invalider les setTimeout d'une partie précédente
+    let soloGameGeneration = 0;
+    // Question piochée pour le boss en mode Classique
+    let classiqueBossQuestion = null;
+
+    /* ─── CLASSIQUE UTILITIES ─── */
+    function normalizeHand(hand) {
+      if (!hand) return [];
+      if (Array.isArray(hand)) return hand;
+      return Object.values(hand);
+    }
+    function getDealtCards() {
+      const dealt = new Set();
+      Object.values(state.players).forEach(p => {
+        normalizeHand(p.hand).forEach(c => dealt.add(c));
+      });
+      return dealt;
+    }
+    function drawUniqueCard(dealt) {
+      const av = DRAW_ANSWERS.filter(c => !dealt.has(c));
+      if (!av.length) return DRAW_ANSWERS[Math.floor(Math.random() * DRAW_ANSWERS.length)];
+      return av[Math.floor(Math.random() * av.length)];
+    }
+    function displayPhrase(p) {
+      if (!p) return '...';
+      return p.replace(/_{1,3}| {2,3}/g, '...');
+    }
+    function initAllHands() {
+      const dealt = new Set();
+      Object.keys(state.players).forEach(pId => {
+        const hand = [];
+        for (let i = 0; i < 5; i++) {
+          const card = drawUniqueCard(dealt);
+          dealt.add(card);
+          hand.push(card);
+        }
+        state.players[pId].hand = hand;
+      });
+    }
+    function renderClassiqueHand() {
+      const p = state.players[state.uid];
+      if (!p) return;
+      const hand = normalizeHand(p.hand);
+      const container = document.getElementById('classique-hand');
+      if (!container) return;
+      container.innerHTML = '';
+      hand.forEach(cardText => {
+        const el = document.createElement('div');
+        el.className = 'card card-white classique-card';
+        el.innerText = cardText;
+        el.onclick = () => playClassiqueCard(cardText);
+        container.appendChild(el);
+      });
+    }
+    window.selectVariant = function(variant) {
+      state.gameVariant = variant;
+      const btnC = document.getElementById('btn-variant-classique');
+      const btnP = document.getElementById('btn-variant-personnalise');
+      if (!btnC || !btnP) return;
+      if (variant === 'classique') {
+        btnC.style.background = 'var(--accent-subtle)';
+        btnC.style.borderColor = 'var(--accent)';
+        btnP.style.background = 'var(--bg-surface)';
+        btnP.style.borderColor = 'var(--border)';
+      } else {
+        btnP.style.background = 'var(--accent-subtle)';
+        btnP.style.borderColor = 'var(--accent)';
+        btnC.style.background = 'var(--bg-surface)';
+        btnC.style.borderColor = 'var(--border)';
+      }
+    };
+    window.classiqueBossRedraw = function() {
+      classiqueBossQuestion = DRAW_QUESTIONS[Math.floor(Math.random() * DRAW_QUESTIONS.length)];
+      const el = document.getElementById('classique-boss-question');
+      if (el) el.innerText = displayPhrase(classiqueBossQuestion);
+    };
+    window.submitClassiquePhrase = async function() {
+      if (!classiqueBossQuestion) return;
+      const phrase = classiqueBossQuestion;
+      classiqueBossQuestion = null;
+      if (state.mode === 'multi') {
+        await update(ref(db, `bmc_creator/${state.roomId}`), { phrase });
+      } else {
+        state.phrase = phrase;
+        runSoloEngine();
+      }
+    };
+    window.playClassiqueCard = async function(cardText) {
+      const myPlayer = state.players[state.uid];
+      if (!myPlayer || myPlayer.locked) return;
+      const hand = [...normalizeHand(myPlayer.hand)];
+      const idx = hand.indexOf(cardText);
+      if (idx === -1) return;
+      const dealt = getDealtCards();
+      dealt.delete(cardText);
+      hand[idx] = drawUniqueCard(dealt);
+      if (state.mode === 'multi') {
+        await update(ref(db, `bmc_creator/${state.roomId}/players/${state.uid}`), {
+          played: cardText, locked: true, hand
+        });
+      } else {
+        myPlayer.played = cardText;
+        myPlayer.locked = true;
+        myPlayer.hand = hand;
+        runSoloEngine();
+      }
+    };
 
     /* ─── UI UTILS ─── */
     window.showScreen = id => {
@@ -1583,7 +1737,8 @@
         bossIdx: state.bossIdx,
         round: state.round,
         maxRounds: state.maxRounds,
-        phrase: state.phrase
+        phrase: state.phrase,
+        gameVariant: state.gameVariant
       };
     }
 
@@ -1599,6 +1754,7 @@
       state.round = Number.isInteger(snapshot.round) ? snapshot.round : state.round;
       state.maxRounds = Number.isInteger(snapshot.maxRounds) ? snapshot.maxRounds : state.maxRounds;
       state.phrase = typeof snapshot.phrase === 'undefined' ? state.phrase : snapshot.phrase;
+      state.gameVariant = snapshot.gameVariant || 'personnalise';
     }
 
     function saveCurrentSession(roomCode, isMultiplayer) {
@@ -1631,6 +1787,8 @@
     ═══════════════════════════════════════════════════════════ */
     window.confirmLeave = async () => {
       if (confirm("Es-tu sûr de vouloir quitter la partie ? Ta progression sera perdue.")) {
+        if (winnerRevealBtnTimer) { clearTimeout(winnerRevealBtnTimer); winnerRevealBtnTimer = null; }
+        soloGameGeneration++; // invalide tous les setTimeout solo en cours
         if (roomListener) { roomListener(); roomListener = null; }
         if (state.mode === 'multi' && state.roomId) {
           if (state.isHost) {
@@ -1736,12 +1894,14 @@
 
     window.openConfig = mode => {
       state.mode = mode;
+      state.gameVariant = 'personnalise';
       document.getElementById('cfg-title').innerText = mode === 'solo' ? 'Mode Solo' : 'Multijoueur';
       
       const soloZone = document.getElementById('cfg-solo-zone');
       const multiActionZone = document.getElementById('cfg-multi-action-zone');
       const multiJoinZone = document.getElementById('cfg-multi-join-zone');
       const roundsZone = document.getElementById('cfg-rounds-zone');
+      const variantZone = document.getElementById('cfg-variant-zone');
       const btnLaunch = document.getElementById('btn-launch-game');
       
       if (mode === 'solo') {
@@ -1749,6 +1909,8 @@
         roundsZone.classList.remove('hidden');
         multiActionZone.classList.add('hidden');
         multiJoinZone.classList.add('hidden');
+        variantZone.classList.remove('hidden');
+        selectVariant('personnalise');
         btnLaunch.innerHTML = '<i data-lucide="rocket"></i>&nbsp;Lancer la partie';
       } else {
         soloZone.classList.add('hidden');
@@ -1762,6 +1924,7 @@
       multiAction = action;
       const joinZone = document.getElementById('cfg-multi-join-zone');
       const roundsZone = document.getElementById('cfg-rounds-zone');
+      const variantZone = document.getElementById('cfg-variant-zone');
       const btnJoin = document.getElementById('btn-action-join');
       const btnCreate = document.getElementById('btn-action-create');
       const btnLaunch = document.getElementById('btn-launch-game');
@@ -1773,6 +1936,7 @@
         btnCreate.style.borderColor = 'var(--border)';
         joinZone.classList.remove('hidden');
         roundsZone.classList.add('hidden');
+        variantZone.classList.add('hidden');
         btnLaunch.innerHTML = '<i data-lucide="log-in"></i>&nbsp;Rejoindre';
       } else {
         btnCreate.style.background = 'var(--accent-subtle)';
@@ -1781,6 +1945,8 @@
         btnJoin.style.borderColor = 'var(--border)';
         joinZone.classList.add('hidden');
         roundsZone.classList.remove('hidden');
+        variantZone.classList.remove('hidden');
+        selectVariant('personnalise');
         document.getElementById('cfg-room').value = ''; // clear code
         btnLaunch.innerHTML = '<i data-lucide="plus-circle"></i>&nbsp;Créer le salon';
       }
@@ -1793,19 +1959,33 @@
         state.maxRounds = parseInt(document.getElementById('cfg-rounds').value) || 5;
         const botCount = parseInt(document.getElementById('cfg-bots').value) || 3;
         
+        // ── Reset complet de la partie précédente ──
+        if (winnerRevealBtnTimer) { clearTimeout(winnerRevealBtnTimer); winnerRevealBtnTimer = null; }
+        soloGameGeneration++; // invalide tous les setTimeout de la partie précédente
+        state.round = 1;
+        state.bossIdx = 0;
+        state.phrase = null;
+        state.winnerReveal = null;
+        state.roomId = null;
         state.isHost = true;
         state.bossThinking = false;
         state.roundResolving = false;
+        classiqueBossQuestion = null;
         state.players = {
           [state.uid]: { name: state.name, score: 0, played: null, locked: false, isThinking: false }
         };
         for(let i=1; i<=botCount; i++) {
             state.players["BOT_"+i] = { name: "Bot "+i, score: 0, played: null, locked: false, isBot: true, isThinking: false };
         }
+        if (state.gameVariant === 'classique') {
+          initAllHands();
+        }
         showScreen('screen-game');
         runSoloEngine();
       } else {
         if (multiAction === 'create') {
+            if (winnerRevealBtnTimer) { clearTimeout(winnerRevealBtnTimer); winnerRevealBtnTimer = null; }
+            soloGameGeneration++; // invalide tout setTimeout solo résiduel
             state.maxRounds = parseInt(document.getElementById('cfg-rounds').value) || 5;
             createRoom();
         } else {
@@ -1827,6 +2007,7 @@
       await set(ref(db, 'bmc_creator/' + state.roomId), {
         status: 'lobby', hostId: state.uid, round: 1, maxRounds: state.maxRounds,
         bossIdx: 0, phrase: null, winnerReveal: null,
+        gameVariant: state.gameVariant,
         players: { [state.uid]: { name: state.name, score: 0, played: null, locked: false } }
       });
       onDisconnect(ref(db, 'bmc_creator/' + state.roomId)).remove();
@@ -1905,6 +2086,12 @@
         state.maxRounds    = data.maxRounds  ?? 5;
         state.phrase       = data.phrase     ?? null;
         state.winnerReveal = data.winnerReveal || null;  // ← sync révélation gagnant
+        state.gameVariant  = data.gameVariant || 'personnalise';
+
+        // Normaliser les mains (Firebase stocke les arrays en objets)
+        Object.values(state.players).forEach(p => {
+          if (p.hand) p.hand = normalizeHand(p.hand);
+        });
 
         document.getElementById('lobby-players').innerHTML =
           Object.values(data.players || {}).map(p => `
@@ -1928,7 +2115,25 @@
       });
     }
 
-    window.multiStartMatch = () => update(ref(db, `bmc_creator/${state.roomId}`), { status: 'playing' });
+    window.multiStartMatch = async () => {
+      const updates = { status: 'playing' };
+      if (state.gameVariant === 'classique') {
+        const dealt = new Set();
+        Object.keys(state.players).forEach(pId => {
+          const hand = [];
+          for (let i = 0; i < 5; i++) {
+            const av = DRAW_ANSWERS.filter(c => !dealt.has(c));
+            const card = av.length > 0
+              ? av[Math.floor(Math.random() * av.length)]
+              : DRAW_ANSWERS[Math.floor(Math.random() * DRAW_ANSWERS.length)];
+            dealt.add(card);
+            hand.push(card);
+          }
+          updates[`players/${pId}/hand`] = hand;
+        });
+      }
+      await update(ref(db, `bmc_creator/${state.roomId}`), updates);
+    };
 
     window.drawIdea = type => {
       if (type === 'boss')   document.getElementById('boss-text').value   = DRAW_QUESTIONS[Math.floor(Math.random() * DRAW_QUESTIONS.length)];
@@ -1937,7 +2142,8 @@
 
     window.submitPhrase = async () => {
       const txt = document.getElementById('boss-text').value.trim();
-      if (!txt.includes('...')) { showToast("Tu dois inclure ... dans ta phrase !", 'error'); return; }
+      const hasBlank = txt.includes('...') || /_{1,3}/.test(txt) || / {2}/.test(txt);
+      if (!hasBlank) { showToast("Tu dois inclure ... dans ta phrase !", 'error'); return; }
       document.getElementById('boss-text').value = '';
       if (state.mode === 'multi') await update(ref(db, `bmc_creator/${state.roomId}`), { phrase: txt });
       else { state.phrase = txt; runSoloEngine(); }
@@ -1978,6 +2184,8 @@
     window.confirmNextRound = async () => {
       const winnerId = state.winnerReveal;
       if (!winnerId) return;
+
+      classiqueBossQuestion = null;
 
       // Nettoyer le timer d'apparition du bouton
       if (winnerRevealBtnTimer) { clearTimeout(winnerRevealBtnTimer); winnerRevealBtnTimer = null; }
@@ -2023,6 +2231,7 @@
     };
     /* ─── SOLO ENGINE ─── */
     function runSoloEngine() {
+      const gen = soloGameGeneration; // capture la génération courante
       updateUI();
       const pIds    = Object.keys(state.players);
       const bossId  = pIds[state.bossIdx];
@@ -2032,6 +2241,7 @@
       if (isBotBoss && !state.phrase && !state.bossThinking) {
         state.bossThinking = true;
         setTimeout(() => {
+          if (soloGameGeneration !== gen) return; // partie abandonnée
           state.phrase = DRAW_QUESTIONS[Math.floor(Math.random() * DRAW_QUESTIONS.length)];
           state.bossThinking = false;
           runSoloEngine();
@@ -2045,7 +2255,17 @@
           if (p.isBot && id !== bossId && !p.locked && !p.isThinking) {
             p.isThinking = true;
             setTimeout(() => {
-              p.played = DRAW_ANSWERS[Math.floor(Math.random() * DRAW_ANSWERS.length)];
+              if (soloGameGeneration !== gen) return; // partie abandonnée
+              if (state.gameVariant === 'classique' && Array.isArray(p.hand) && p.hand.length > 0) {
+                const cardIdx = Math.floor(Math.random() * p.hand.length);
+                const cardText = p.hand[cardIdx];
+                const dealt = getDealtCards();
+                dealt.delete(cardText);
+                p.hand[cardIdx] = drawUniqueCard(dealt);
+                p.played = cardText;
+              } else {
+                p.played = DRAW_ANSWERS[Math.floor(Math.random() * DRAW_ANSWERS.length)];
+              }
               p.locked = true;
               p.isThinking = false;
               runSoloEngine();
@@ -2064,6 +2284,7 @@
         updateUI(); // affiche la carte gagnante avec le nom du joueur
         // Le bot passe automatiquement à la manche suivante après 7 secondes
         setTimeout(() => {
+          if (soloGameGeneration !== gen) return; // partie abandonnée
           confirmNextRound();
         }, 7000);
       }
@@ -2080,10 +2301,12 @@
       document.getElementById('ui-role').innerText  = isBoss ? "TU ES LE BOSS 👑" : "JOUEUR ✍️";
       updateRoundPips();
 
-      const zBoss   = document.getElementById('zone-boss-input');
-      const zPlayer = document.getElementById('zone-player-input');
-      const zWait   = document.getElementById('zone-waiting');
-      const zReveal = document.getElementById('zone-winner-reveal');
+      const zBoss          = document.getElementById('zone-boss-input');
+      const zPlayer        = document.getElementById('zone-player-input');
+      const zWait          = document.getElementById('zone-waiting');
+      const zReveal        = document.getElementById('zone-winner-reveal');
+      const zClassiqueBoss = document.getElementById('zone-classique-boss');
+      const zClassiquePlayer = document.getElementById('zone-classique-player');
       const phraseDisp = document.getElementById('phrase-display');
       const blueCard   = document.getElementById('blue-card');
 
@@ -2091,11 +2314,13 @@
       zPlayer.classList.add('hidden');
       zWait.classList.add('hidden');
       zReveal.classList.add('hidden');
+      zClassiqueBoss.classList.add('hidden');
+      zClassiquePlayer.classList.add('hidden');
 
       /* ── PHASE RÉVÉLATION DU GAGNANT ── */
       if (state.winnerReveal) {
         blueCard.classList.remove('pulse-border');
-        phraseDisp.innerText = state.phrase ? state.phrase.replace(/___/g, '...') : '...';
+        phraseDisp.innerText = displayPhrase(state.phrase);
 
         const winnerName = (state.players[state.winnerReveal] && state.players[state.winnerReveal].name)
           ? state.players[state.winnerReveal].name : '?';
@@ -2134,7 +2359,15 @@
         blueCard.classList.toggle('pulse-border', isBoss);
 
         if (isBoss) {
-          zBoss.classList.remove('hidden');
+          if (state.gameVariant === 'classique') {
+            zClassiqueBoss.classList.remove('hidden');
+            if (!classiqueBossQuestion) {
+              classiqueBossQuestion = DRAW_QUESTIONS[Math.floor(Math.random() * DRAW_QUESTIONS.length)];
+            }
+            document.getElementById('classique-boss-question').innerText = displayPhrase(classiqueBossQuestion);
+          } else {
+            zBoss.classList.remove('hidden');
+          }
         } else {
           zWait.classList.remove('hidden');
           document.getElementById('wait-msg-footer').innerText = `En attente de ${bossName}...`;
@@ -2146,7 +2379,7 @@
       } else {
         if (winnerRevealBtnTimer) { clearTimeout(winnerRevealBtnTimer); winnerRevealBtnTimer = null; }
         blueCard.classList.remove('pulse-border');
-        phraseDisp.innerText = state.phrase.replace(/___/g, '...');
+        phraseDisp.innerText = displayPhrase(state.phrase);
 
         const competitors = pIds.filter(id => id !== bossId);
         const allLocked   = competitors.every(id => state.players[id].locked);
@@ -2165,7 +2398,12 @@
             zWait.classList.remove('hidden');
             document.getElementById('wait-msg-footer').innerText = "Réponse envoyée ! ✓";
           } else {
-            zPlayer.classList.remove('hidden');
+            if (state.gameVariant === 'classique') {
+              zClassiquePlayer.classList.remove('hidden');
+              renderClassiqueHand();
+            } else {
+              zPlayer.classList.remove('hidden');
+            }
           }
           const lockedCount = competitors.filter(id => state.players[id].locked).length;
           document.getElementById('ui-status').innerText = `${lockedCount} / ${competitors.length} VALIDÉS`;
